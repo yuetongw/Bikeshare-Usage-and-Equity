@@ -1,0 +1,246 @@
+---
+title: "Bikeshare Usage and Equity in Washington DC"
+author: "Yuetong Wang"
+date: "`r Sys.Date()`"
+output:
+   html_document:
+     toc: TRUE
+     toc_float: TRUE
+     theme: "spacelab"
+     code_folding: show
+     number_section: TRUE
+     fig_height: 4
+     fig_width: 6
+     fig_align: 'center'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+library(readr)
+library(tidyverse)
+library(corrplot)
+library(car)
+library(PerformanceAnalytics)
+library(leaps)
+library(sf)
+library(gstat)
+library(rpart)
+library(rpart.plot)
+library(ranger)
+library(nlme)
+```
+
+# Load the dataset
+
+```{r}
+Final_Table <- read_csv("./Final Table.csv", show_col_types = FALSE)
+Final_Table
+```
+
+# Correlation between variables
+
+```{r fig.width=4, fig.height=3}
+corr_plot <- cor(Final_Table[,6:20])
+corrplot(corr_plot, method = "circle", tl.col="black", tl.cex=0.8)
+```
+
+```{r fig.width=4, fig.height=3}
+corrplot(corr_plot, method = "number", number.cex = 0.7, tl.col="black", tl.cex=0.8)
+```
+
+```{r fig.width=4, fig.height=3}
+chart.Correlation(Final_Table[,6:20], histogram=TRUE, pch=19)
+```
+
+# Make a Spatial Dataframe
+
+```{r}
+Final_Table_sf <- st_as_sf(Final_Table, coords = c("lng","lat"))
+class(Final_Table_sf)
+st_crs(Final_Table_sf) <- 4326
+```
+
+```{r}
+ggplot(data = Final_Table_sf) +
+  geom_sf(mapping = aes(size=MHI, color=O_Trip)) +
+  labs(x = "Longitude", y = "Latitude", title = "Trip per year", color="Bikeshare Trips", size = "MHI")
+```
+
+# Multiple Linear Regression
+
+## OLS Model including all variables
+
+```{r}
+# Select the dependent and independent variables
+Final_Table_model <- Final_Table[,6:20]
+```
+
+```{r}
+Linear_model <- lm(L_O_Trip ~ SWalk_Den + BikeL_Den + Capacity + N_OBike + N_MetroS + N_BusS + Pop_Den + P_White + P_Young + MHI + P_NoCar + P_Renter + Unemploy_R + Crash, data = Final_Table_model)
+summary(Linear_model)
+plot(Linear_model)
+```
+
+
+```{r}
+# Calculate the VIF values
+vif(Linear_model)
+
+# Calculate the AIC value
+AIC(Linear_model)
+
+```
+
+## Best Subset Selection including all variables
+
+```{r}
+regfit_full = regsubsets(L_O_Trip ~ SWalk_Den + BikeL_Den + Capacity + N_OBike + N_MetroS + N_BusS + Pop_Den + P_White + P_Young + MHI + P_NoCar + P_Renter + Unemploy_R + Crash, data = Final_Table_model, nvmax = 14)
+summary(regfit_full)
+```
+
+```{r}
+reg_summary = summary(regfit_full)
+reg_summary$adjr2
+reg_summary$bic
+```
+
+
+## OLS not include P_White
+
+```{r}
+Linear_model_NoPWhite <- lm(L_O_Trip ~ SWalk_Den + BikeL_Den + Capacity + N_OBike + N_MetroS + N_BusS + Pop_Den + P_Young + MHI + P_NoCar + P_Renter + Unemploy_R + Crash, data = Final_Table_model)
+summary(Linear_model_NoPWhite)
+plot(Linear_model_NoPWhite)
+```
+
+```{r}
+# Calculate the VIF values
+vif(Linear_model_NoPWhite)
+
+# Calculate the AIC value
+AIC(Linear_model_NoPWhite)
+
+BIC(Linear_model_NoPWhite)
+
+```
+
+### Best Subset Selection not include P_White
+
+```{r}
+regfit_full = regsubsets(L_O_Trip ~ SWalk_Den + BikeL_Den + Capacity + N_OBike + N_MetroS + N_BusS + Pop_Den + P_Young + MHI + P_NoCar + P_Renter + Unemploy_R + Crash, data = Final_Table_model, nvmax = 13)
+summary(regfit_full)
+```
+
+### Check the adjusted R-square
+
+```{r}
+reg_summary = summary(regfit_full)
+reg_summary$adjr2
+reg_summary$bic
+```
+
+# Generalized Least Squares
+
+```{r}
+Final_Table_sf$residual <- Linear_model_NoPWhite$residuals
+
+v <- variogram(residual~1,data=Final_Table_sf)
+plot(v)
+```
+
+
+```{r}
+# change the crs
+Final_Table_sf_utm <- st_transform(Final_Table_sf, crs=26918)
+st_bbox(Final_Table_sf_utm)
+
+Final_Table_utm <- cbind(Final_Table_sf_utm, st_coordinates(Final_Table_sf_utm))
+Final_Table_utm
+names(Final_Table_utm)
+
+model_gls <- gls(
+  model = L_O_Trip ~ SWalk_Den + BikeL_Den + Capacity + N_OBike + N_MetroS + N_BusS + Pop_Den + P_Young + MHI + P_NoCar + P_Renter + Unemploy_R + Crash, 
+  data = Final_Table_utm,
+  method = "ML",
+  correlation = corExp(form = ~X + Y,
+                       nugget = TRUE,
+                       value = c(7000/3,0.4))
+)
+summary(model_gls)
+```
+
+```{r}
+plot(Final_Table_utm$L_O_Trip ~ predict(model_gls), pch=20, asp=1, 
+     xlab="Fitted by GLS", ylab="Actual", main="log trips")
+grid()
+abline(0,1)
+```
+
+
+# Building Regression Tree
+
+```{r}
+Final_Table_model_tree <- rpart(L_O_Trip ~ SWalk_Den + BikeL_Den + Capacity + N_OBike + N_MetroS + N_BusS + Pop_Den + P_White + P_Young + MHI + P_NoCar + P_Renter + Unemploy_R + Crash, data = Final_Table_model)
+print(Final_Table_model_tree)
+```
+```{r}
+rpart.plot(Final_Table_model_tree)
+```
+
+```{r}
+data.frame(variableImportance = 100 * Final_Table_model_tree$variable.importance / sum(Final_Table_model_tree$variable.importance))
+```
+
+## Not include P_White
+
+```{r}
+Final_Table_model_tree_NoPWhite <- rpart(L_O_Trip ~ SWalk_Den + BikeL_Den + Capacity + N_OBike + N_MetroS + N_BusS + Pop_Den + P_Young + MHI + P_NoCar + P_Renter + Unemploy_R + Crash, data = Final_Table_model)
+print(Final_Table_model_tree_NoPWhite)
+```
+
+```{r}
+rpart.plot(Final_Table_model_tree_NoPWhite)
+```
+
+```{r}
+data.frame(variableImportance = 100 * Final_Table_model_tree_NoPWhite$variable.importance / sum(Final_Table_model_tree_NoPWhite$variable.importance))
+```
+
+
+# Random Forest
+
+```{r}
+library(randomForest)
+library(caret)
+
+# Fit a random forest model
+rf_model <- randomForest(L_O_Trip ~ ., data = Final_Table_model)
+
+summary(rf_model)
+
+rf_model
+
+# Get the feature importance scores
+importance(rf_model)
+
+# Plot the variable importance
+varImpPlot(rf_model)
+
+```
+
+## Random Forest not include P_White
+
+```{r}
+# Fit a random forest model
+rf_model_NoPWhite <- randomForest(L_O_Trip ~ SWalk_Den + BikeL_Den + Capacity + N_OBike + N_MetroS + N_BusS + Pop_Den + P_Young + MHI + P_NoCar + P_Renter + Unemploy_R + Crash, data = Final_Table_model)
+
+rf_model_NoPWhite
+
+# Get the feature importance scores
+importance(rf_model_NoPWhite)
+
+# Plot the variable importance
+varImpPlot(rf_model_NoPWhite)
+```
+
+
